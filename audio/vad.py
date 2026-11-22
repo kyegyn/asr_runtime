@@ -4,12 +4,24 @@ import math
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .types import AudioChunk, SpeechSegment
+
+
+@dataclass(frozen=True)
+class _VadFrame:
+    samples: np.ndarray
+    actual_length: int
+    start_sample: int
+    end_sample: int
+    start_time_monotonic: float | None
+    is_speech: bool
+    compute_ms: float
 
 
 class SileroVadOnnx:
@@ -55,51 +67,88 @@ class VadSegmenter:
         self.max_speech_samples = int(sample_rate * float(config.get("max_speech_sec", 15)))
         self.min_segment_samples = int(sample_rate * float(config.get("min_segment_ms", 500)) / 1000)
         self.pre_frames = max(1, math.ceil(sample_rate * float(config.get("pre_pad_ms", 200)) / 1000 / frame_samples))
-        self._pre_roll: deque[np.ndarray] = deque(maxlen=self.pre_frames)
-        self._active_frames: list[np.ndarray] = []
+        activation_frames = max(1, math.ceil(self.min_speech_samples / frame_samples))
+        self._history_capacity = self.pre_frames + activation_frames
+        self._history: deque[_VadFrame] = deque(maxlen=self._history_capacity)
+        self._active_frames: list[_VadFrame] = []
         self._active = False
         self._candidate_samples = 0
         self._candidate_start_sample = 0
         self._speech_start_sample = 0
         self._last_speech_end_sample = 0
         self._last_speech_end_time: float | None = None
+        self._speech_samples = 0
         self._stream_sample = 0
-        self._vad_compute_ms = 0.0
+        self._segment_vad_compute_ms = 0.0
+        self._total_vad_compute_ms = 0.0
+        self._total_vad_frames = 0
         self._segment_counter = 0
         self.discarded_short_segments = 0
 
-    def _segment(self, reason: str, source_mode: str) -> SpeechSegment | None:
-        valid_samples = max(0, self._last_speech_end_sample - self._speech_start_sample)
-        if valid_samples < self.min_segment_samples or not self._active_frames:
+    def _reset_segment_state(self, retain_history: bool) -> None:
+        retained = self._active_frames[-self.pre_frames:] if retain_history else []
+        self._history = deque(retained, maxlen=self._history_capacity)
+        self._active_frames = []
+        self._active = False
+        self._candidate_samples = 0
+        self._speech_samples = 0
+        self._segment_vad_compute_ms = 0.0
+
+    def _segment(self, reason: str, source_mode: str, retain_history: bool = True) -> SpeechSegment | None:
+        if self._speech_samples < self.min_segment_samples or not self._active_frames:
             self.discarded_short_segments += 1
             result = None
         else:
             self._segment_counter += 1
             tail_samples = max(0, self._stream_sample - self._last_speech_end_sample)
+            audio_samples = np.concatenate(
+                [frame.samples[:frame.actual_length] for frame in self._active_frames]
+            )
+            audio_sample_count = sum(frame.actual_length for frame in self._active_frames)
+            speech_span_samples = max(0, self._last_speech_end_sample - self._speech_start_sample)
             result = SpeechSegment(
                 segment_id=f"{self._segment_counter:04d}",
-                samples=np.ascontiguousarray(np.concatenate(self._active_frames), dtype=np.float32),
+                samples=np.ascontiguousarray(audio_samples, dtype=np.float32),
                 sample_rate=self.sample_rate,
-                valid_speech_sec=valid_samples / self.sample_rate,
-                vad_compute_ms=self._vad_compute_ms,
+                audio_start_monotonic=(
+                    self._active_frames[0].start_time_monotonic if source_mode == "realtime" else None
+                ),
+                audio_duration_sec=audio_sample_count / self.sample_rate,
+                speech_frame_sec=self._speech_samples / self.sample_rate,
+                speech_span_sec=speech_span_samples / self.sample_rate,
+                vad_frame_avg_ms=(
+                    self._total_vad_compute_ms / self._total_vad_frames if self._total_vad_frames else 0.0
+                ),
+                vad_segment_compute_ms=self._segment_vad_compute_ms,
                 tail_wait_ms=tail_samples / self.sample_rate * 1000.0,
                 end_reason=reason,
                 last_speech_end_monotonic=self._last_speech_end_time if source_mode == "realtime" else None,
                 vad_confirmed_monotonic=time.perf_counter(),
                 source_mode=source_mode,  # type: ignore[arg-type]
             )
-        retained = self._active_frames[-self.pre_frames:] if self._active_frames else []
-        self._pre_roll = deque((frame.copy() for frame in retained), maxlen=self.pre_frames)
-        self._active_frames = []
-        self._active = False
-        self._candidate_samples = 0
-        self._vad_compute_ms = 0.0
+        self._reset_segment_state(retain_history)
         return result
+
+    def _handle_discontinuity(self, missing_samples: int, source_mode: str) -> list[SpeechSegment]:
+        outputs: list[SpeechSegment] = []
+        if self._active:
+            segment = self._segment("input_gap", source_mode, retain_history=False)
+            if segment:
+                outputs.append(segment)
+        else:
+            self._active_frames = []
+            self._history.clear()
+            self._candidate_samples = 0
+        self._stream_sample += max(0, missing_samples)
+        reset_states = getattr(self.predictor, "reset_states", None)
+        if callable(reset_states):
+            reset_states()
+        return outputs
 
     def process(self, chunk: AudioChunk) -> list[SpeechSegment]:
         if chunk.sample_rate != self.sample_rate:
             raise ValueError(f"VAD 采样率不匹配: {chunk.sample_rate}")
-        outputs: list[SpeechSegment] = []
+        outputs = self._handle_discontinuity(chunk.discontinuity_samples, chunk.source_mode) if chunk.discontinuity_samples else []
         for offset in range(0, len(chunk.samples), self.frame_samples):
             frame = chunk.samples[offset:offset + self.frame_samples]
             actual_length = len(frame)
@@ -114,28 +163,45 @@ class VadSegmenter:
             )
             started = time.perf_counter()
             probability = self.predictor(frame)
-            self._vad_compute_ms += (time.perf_counter() - started) * 1000.0
+            compute_ms = (time.perf_counter() - started) * 1000.0
+            self._total_vad_compute_ms += compute_ms
+            self._total_vad_frames += 1
             is_speech = probability >= self.threshold
+            vad_frame = _VadFrame(
+                frame,
+                actual_length,
+                frame_start_sample,
+                frame_end_sample,
+                frame_time,
+                is_speech,
+                compute_ms,
+            )
 
             if not self._active:
-                self._pre_roll.append(frame.copy())
+                self._history.append(vad_frame)
                 if is_speech:
                     if self._candidate_samples == 0:
                         self._candidate_start_sample = frame_start_sample
                     self._candidate_samples += actual_length
                     if self._candidate_samples >= self.min_speech_samples:
                         self._active = True
-                        self._active_frames = [item.copy() for item in self._pre_roll]
+                        self._active_frames = list(self._history)
                         self._speech_start_sample = self._candidate_start_sample
                         self._last_speech_end_sample = frame_end_sample
+                        self._speech_samples = self._candidate_samples
+                        self._segment_vad_compute_ms = sum(
+                            item.compute_ms for item in self._active_frames
+                        )
                         self._last_speech_end_time = (
                             frame_time + actual_length / self.sample_rate if frame_time is not None else None
                         )
                 else:
                     self._candidate_samples = 0
             else:
-                self._active_frames.append(frame.copy())
+                self._active_frames.append(vad_frame)
+                self._segment_vad_compute_ms += compute_ms
                 if is_speech:
+                    self._speech_samples += actual_length
                     self._last_speech_end_sample = frame_end_sample
                     self._last_speech_end_time = (
                         frame_time + actual_length / self.sample_rate if frame_time is not None else None

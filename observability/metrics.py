@@ -25,6 +25,10 @@ class RuntimeMetrics:
     cuda_errors: int = 0
     timeouts: int = 0
     vad_tail_ms: list[float] = field(default_factory=list)
+    vad_frame_avg_ms: list[float] = field(default_factory=list)
+    vad_segment_ms: list[float] = field(default_factory=list)
+    speech_frame_ms: list[float] = field(default_factory=list)
+    speech_span_ms: list[float] = field(default_factory=list)
     asr_ms: list[float] = field(default_factory=list)
     sid_ms: list[float] = field(default_factory=list)
     total_ms: list[float] = field(default_factory=list)
@@ -41,6 +45,10 @@ class RuntimeMetrics:
                 "[SUMMARY]",
                 f"  总识别段数       {self.total_segments}",
                 f"  成功/失败        {self.success}/{self.failed}",
+                f"  语音帧 P50/P95   {self.pair(self.speech_frame_ms)}",
+                f"  语音跨度 P50/P95 {self.pair(self.speech_span_ms)}",
+                f"  VAD单帧 P50/P95  {self.pair(self.vad_frame_avg_ms)}",
+                f"  VAD本段 P50/P95  {self.pair(self.vad_segment_ms)}",
                 f"  VAD收尾 P50/P95  {self.pair(self.vad_tail_ms)}",
                 f"  ASR P50/P95      {self.pair(self.asr_ms)}",
                 f"  SID P50/P95      {self.pair(self.sid_ms)}",

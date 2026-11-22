@@ -17,6 +17,7 @@ REASON_LABELS = {
     "max_duration": "最大长度",
     "audio_end": "音频结束",
     "interrupted": "程序中断",
+    "input_gap": "输入丢帧",
 }
 
 
@@ -46,6 +47,10 @@ class ResultAggregator:
             self._traces[segment.segment_id] = SegmentTrace(segment, time.perf_counter())
             self.metrics.total_segments += 1
             self.metrics.vad_tail_ms.append(segment.tail_wait_ms)
+            self.metrics.vad_frame_avg_ms.append(segment.vad_frame_avg_ms)
+            self.metrics.vad_segment_ms.append(segment.vad_segment_compute_ms)
+            self.metrics.speech_frame_ms.append(segment.speech_frame_sec * 1000.0)
+            self.metrics.speech_span_ms.append(segment.speech_span_sec * 1000.0)
 
     def accept(self, branch: str, result: dict[str, Any]) -> None:
         with self._condition:
@@ -64,6 +69,18 @@ class ResultAggregator:
                 self._traces.pop(trace.segment.segment_id, None)
                 self._condition.notify_all()
 
+    def reject(self, segment_id: str, reason: str) -> None:
+        with self._condition:
+            trace = self._traces.pop(segment_id, None)
+            if trace is None:
+                self.logger.error("拒绝未知 segment_id: %s", segment_id)
+                return
+            trace.status = "ERROR"
+            trace.errors.append(reason)
+            self.metrics.failed += 1
+            self.logger.error("语音段未进入模型队列 segment_id=%s reason=%s", segment_id, reason)
+            self._condition.notify_all()
+
     def _finalize(self, trace: SegmentTrace) -> None:
         aggregate_started = time.perf_counter()
         asr = trace.asr_result or {}
@@ -75,7 +92,7 @@ class ResultAggregator:
                 self.metrics.timeouts += int(bool(result.get("timeout")))
 
         embedding = _value(sid, "embedding")
-        if trace.segment.valid_speech_sec < self.sid_min_audio_sec:
+        if trace.segment.speech_frame_sec < self.sid_min_audio_sec:
             match = MatchResult("unknown", None, self.matcher.threshold, "unknown", 0.0)
         else:
             match = self.matcher.match(embedding)
@@ -110,8 +127,11 @@ class ResultAggregator:
                 f"━━━━━━ 语音段 #{trace.segment.segment_id} ━━━━━━",
                 "",
                 "[T1 VAD 语音检测]",
-                f"  语音时长        {trace.segment.valid_speech_sec:.2f}s",
-                f"  VAD计算         {trace.segment.vad_compute_ms:.1f}ms",
+                f"  实际语音帧      {trace.segment.speech_frame_sec:.3f}s",
+                f"  语音段跨度      {trace.segment.speech_span_sec:.3f}s",
+                f"  ASR输入时长     {trace.segment.audio_duration_sec:.3f}s",
+                f"  VAD单帧平均     {trace.segment.vad_frame_avg_ms:.3f}ms",
+                f"  本段VAD累计     {trace.segment.vad_segment_compute_ms:.1f}ms",
                 f"  静音收尾        {trace.segment.tail_wait_ms:.1f}ms",
                 f"  分段原因        {REASON_LABELS.get(trace.segment.end_reason, trace.segment.end_reason)}",
                 "",
@@ -155,6 +175,12 @@ class ResultAggregator:
             "speaker_status": match.status,
             "status": trace.status,
             "total_latency_ms": total_latency_ms,
+            "audio_duration_sec": trace.segment.audio_duration_sec,
+            "speech_frame_sec": trace.segment.speech_frame_sec,
+            "speech_span_sec": trace.segment.speech_span_sec,
+            "vad_frame_avg_ms": trace.segment.vad_frame_avg_ms,
+            "vad_segment_compute_ms": trace.segment.vad_segment_compute_ms,
+            "tail_wait_ms": trace.segment.tail_wait_ms,
         }
         if self.output_text:
             self.logger.info("[RESULT] %s", json.dumps(result_payload, ensure_ascii=False))

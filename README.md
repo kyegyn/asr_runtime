@@ -72,6 +72,7 @@ python -m asr_runtime.cli list-speakers
 
 - 输入统一为 16kHz、单声道、float32、每帧 512 samples。
 - 默认静音收尾为 650ms，避免自然停顿被过度切分；阈值、最长语音、前沿补偿等均在 `config.yaml`。
+- `min_segment_ms` 和 SID 最短音频门槛都使用 VAD 判定为语音的帧累计时长；语音段跨度只用于观测，不参与这两项过滤。
 - 麦克风和实时 WAV 使用采样位置对应的单调时钟计算“最后有效语音→结果输出”。
 - 快速离线模式没有真实采集时钟，T5 明确显示 `N/A（快速处理模式）`，只报告实际推理与调度耗时。
 
@@ -80,7 +81,7 @@ python -m asr_runtime.cli list-speakers
 每次命令都会在 `log/` 新建 `asr_YYYYMMDD_HHMMSS_PID.log`。主进程和 Worker 统一通过 `QueueHandler + QueueListener` 写 UTF-8 文件并输出到 PowerShell。
 
 - T0：VAD/ASR/SID 加载、预热、设备和整体启动。
-- T1：有效语音、VAD 计算、静音收尾和分段原因。
+- T1：实际语音帧累计、语音段跨度、ASR 输入时长、VAD 单帧平均/本段累计、静音收尾和分段原因。
 - T2：ASR 排队、推理和文本。
 - T3：CAM++ FBank、CUDA Event 前向、总耗时和维度。
 - T4：声纹身份、相似度、阈值、状态和耗时。
@@ -92,6 +93,20 @@ python -m asr_runtime.cli list-speakers
 uv run --project .\asr_runtime python -m pytest .\asr_runtime\tests
 uv run --project .\asr_runtime python -m compileall -q .\asr_runtime
 ```
+
+## 短指令 VAD 校准
+
+不要仅凭合成语音直接降低 `min_speech_ms` 或 `min_segment_ms`。校准清单使用 CSV，至少包含 `file`、`expected_speech`、`speech_duration_sec` 和 `source_type`；短指令正样本应标记 `source_type=human`，同时必须包含安静环境、家居噪声和非指令人声等负样本。
+
+```powershell
+uv run --project .\asr_runtime python -m asr_runtime.vad_eval `
+  --manifest .\vad_validation\manifest.csv `
+  --audio-root .\vad_validation `
+  --min-speech-ms 160,200,250 `
+  --min-segment-ms 250,350,500
+```
+
+输出包含各语音长度档的漏检率、负样本误触发率和明细文件。只有同时具备真人短指令、负样本及至少两个正样本时长档时，`supports_threshold_adjustment` 才为 `true`。现有 `test_audio` 是单音色 TTS，只能使用 `--assume-positive` 做回归，不能作为业务阈值调整依据。
 
 历史 V2 的 102.56ms ASR P95、46.53ms SID P95 和 103.27ms 汇合 P95 仅是原 benchmark 参考值，新运行时必须以自身日志实测为准。
 

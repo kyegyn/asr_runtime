@@ -129,6 +129,7 @@ class WorkerClient:
         self.timeout_sec = timeout_sec
         self.log_queue = log_queue
         self.log_level = log_level
+        self.logger = logging.getLogger(f"worker-client.{name}")
         self.task_queue: Any = None
         self.result_queue: Any = None
         self.process: mp.Process | None = None
@@ -167,34 +168,58 @@ class WorkerClient:
                 raise RuntimeError(f"{self.name} Worker 加载失败: {ready.get('error')}\n{ready.get('traceback', '')}")
             self.ready = ready
             self.generation += 1
+            self.logger.info(
+                "%s Worker 客户端就绪 generation=%s restarts=%s",
+                self.name.upper(),
+                self.generation,
+                self.restarts,
+            )
 
-    def submit(self, segment_id: str, samples: Any, sample_rate: int, enqueue_timeout: float) -> int:
+    def submit(self, segment_id: str, samples: Any, sample_rate: int) -> int:
         with self._lock:
             if not self.process or not self.process.is_alive():
+                self.logger.error(
+                    "%s Worker 异常退出，将在调度线程重启 generation=%s",
+                    self.name.upper(),
+                    self.generation,
+                )
                 self.restart()
             submitted_ns = time.perf_counter_ns()
-            self.task_queue.put(
+            self.task_queue.put_nowait(
                 {
                     "segment_id": segment_id,
                     "samples": samples,
                     "sample_rate": sample_rate,
                     "submitted_ns": submitted_ns,
-                },
-                timeout=enqueue_timeout,
+                }
             )
             return self.generation
 
     def receive(self, expected_segment_id: str) -> dict[str, Any]:
         result_queue = self.result_queue
+        generation = self.generation
         try:
             result = result_queue.get(timeout=self.timeout_sec)
         except queue.Empty:
-            self.restart()
+            restarted = False
+            with self._lock:
+                if self.generation == generation and self.result_queue is result_queue:
+                    self.restart()
+                    restarted = True
+            self.logger.error(
+                "%s Worker 推理超时 generation=%s restarted=%s",
+                self.name.upper(),
+                generation,
+                restarted,
+            )
             return {
                 "ok": False,
                 "name": self.name,
                 "segment_id": expected_segment_id,
-                "error": f"{self.name} inference timeout after {self.timeout_sec}s; worker restarted",
+                "error": (
+                    f"{self.name} inference timeout after {self.timeout_sec}s; "
+                    f"worker_restarted={restarted}"
+                ),
                 "timeout": True,
                 "cuda_error": False,
             }
@@ -216,9 +241,37 @@ class WorkerClient:
 
     def restart(self) -> None:
         with self._lock:
+            previous_generation = self.generation
             self._terminate_locked()
             self.restarts += 1
+            self.logger.warning(
+                "%s Worker 开始重启 previous_generation=%s restart_count=%s",
+                self.name.upper(),
+                previous_generation,
+                self.restarts,
+            )
             self.start()
+
+    @staticmethod
+    def _queue_depth(ipc_queue: Any) -> int | None:
+        if ipc_queue is None:
+            return None
+        try:
+            return int(ipc_queue.qsize())
+        except (AttributeError, NotImplementedError, OSError):
+            return None
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "name": self.name,
+                "generation": self.generation,
+                "restarts": self.restarts,
+                "alive": bool(self.process and self.process.is_alive()),
+                "task_queue_depth": self._queue_depth(self.task_queue),
+                "result_queue_depth": self._queue_depth(self.result_queue),
+                "queue_capacity": self.queue_size,
+            }
 
     def _terminate_locked(self) -> None:
         if self.process and self.process.is_alive():

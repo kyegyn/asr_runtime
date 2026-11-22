@@ -35,8 +35,9 @@ campplus:
 
 workers:
   queue_size: 8
+  submission_queue_size: 16
+  result_queue_size: 64
   inference_timeout_sec: 120
-  enqueue_timeout_sec: 2
   shutdown_timeout_sec: 10
   warmup_audio: test_audio/command/001_command.wav
 

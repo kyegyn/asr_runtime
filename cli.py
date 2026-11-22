@@ -149,7 +149,8 @@ def _submit_segments(
 ) -> None:
     for segment in segments:
         aggregator.register(segment)
-        scheduler.submit(segment)
+        if not scheduler.submit(segment):
+            aggregator.reject(segment.segment_id, "scheduler submission queue full")
 
 
 def _run(args: argparse.Namespace, config: dict[str, Any], paths: Any, log_manager: LogManager) -> int:
@@ -216,8 +217,9 @@ def _run(args: argparse.Namespace, config: dict[str, Any], paths: Any, log_manag
         scheduler.close()
         aggregator.wait_all(timeout=float(config["workers"].get("inference_timeout_sec", 120)) + 5)
         aggregator.log_summary()
-        if source is not None and getattr(source, "dropped_frames", 0):
-            logger.warning("麦克风回调队列丢帧: %s", source.dropped_frames)
+        logger.info("模型调度统计: %s", json.dumps(scheduler.stats(), ensure_ascii=False))
+        if source is not None and callable(getattr(source, "stats", None)):
+            logger.info("麦克风采集统计: %s", json.dumps(source.stats(), ensure_ascii=False))
     return 0
 
 
