@@ -3,6 +3,9 @@
 __pycache__/
 .pytest_cache/
 *.py[cod]
+config.yaml
+models/
+test_audio/
 log/*.log
 data/speakers/*.npy
 data/speakers/registry.json

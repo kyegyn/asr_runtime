@@ -4,18 +4,20 @@
 
 ## 环境与 uv
 
-项目使用自己的 Python 3.12 虚拟环境和 `uv.lock`，不会修改 `D:\Work\asr` 的环境。模型和测试音频只从同级目录读取，不会下载或覆盖。
+项目使用自己的 Python 3.12 虚拟环境和 `uv.lock`，不会修改其他项目的环境。模型和测试音频只从本地配置指定的目录读取，不会下载或覆盖。
 
 ```powershell
-cd D:\Work\asr_runtime
-$env:UV_CACHE_DIR = "D:\Work\asr_runtime\.uv-cache"
+git clone git@github.com:kyegyn/asr_runtime.git
+cd .\asr_runtime
+Copy-Item .\config.example.yaml .\config.yaml
 uv sync --extra dev
 ```
 
-从 `D:\Work` 运行目标 CLI：
+`config.yaml` 是本机配置且已被 Git 忽略。默认路径相对于配置文件所在目录；请按本机实际位置修改模型、测试音频、CUDA 设备号和麦克风设备。若暂未创建本机配置，程序会读取 `config.example.yaml`。
+
+从仓库的父目录运行目标 CLI：
 
 ```powershell
-cd D:\Work
 .\asr_runtime\.venv\Scripts\Activate.ps1
 python -m asr_runtime.cli check
 ```
@@ -87,7 +89,6 @@ python -m asr_runtime.cli list-speakers
 ## 测试
 
 ```powershell
-cd D:\Work
 uv run --project .\asr_runtime python -m pytest .\asr_runtime\tests
 uv run --project .\asr_runtime python -m compileall -q .\asr_runtime
 ```

@@ -1,6 +1,7 @@
 paths:
-  models_root: ../models
-  test_audio_root: ../test_audio
+  # Relative paths are resolved from the directory containing this config file.
+  models_root: models
+  test_audio_root: test_audio
   log_root: log
   speaker_registry_root: data/speakers
   sensevoice_candidates: [SenseVoiceSmall]
@@ -21,6 +22,7 @@ vad:
   min_segment_ms: 500
 
 sensevoice:
+  # Change the index if this runtime should use a different CUDA device.
   device: cuda:0
   language: zh
   use_itn: true
@@ -32,22 +34,21 @@ campplus:
   min_audio_sec: 1.0
 
 workers:
-  gpu_index: 0
   queue_size: 8
   inference_timeout_sec: 120
   enqueue_timeout_sec: 2
   shutdown_timeout_sec: 10
-  warmup_audio: ../test_audio/command/001_command.wav
+  warmup_audio: test_audio/command/001_command.wav
 
 speaker:
   match_threshold: 0.70
 
 input:
   wav_gap_ms: 900
+  # Use null for the system default, or set a local sounddevice device id.
   microphone_device: null
   microphone_queue_frames: 128
 
 logging:
   level: INFO
   output_text: true
-
