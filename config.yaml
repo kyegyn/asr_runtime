@@ -1,0 +1,53 @@
+paths:
+  models_root: ../models
+  test_audio_root: ../test_audio
+  log_root: log
+  speaker_registry_root: data/speakers
+  sensevoice_candidates: [SenseVoiceSmall]
+  campplus_candidates: [campplus]
+  silero_vad_candidates: [silero-vad]
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  frame_samples: 512
+
+vad:
+  threshold: 0.50
+  min_speech_ms: 250
+  min_silence_ms: 650
+  max_speech_sec: 15.0
+  pre_pad_ms: 200
+  min_segment_ms: 500
+
+sensevoice:
+  device: cuda:0
+  language: zh
+  use_itn: true
+  batch_size_s: 60
+  disable_pbar: true
+
+campplus:
+  device: cuda:0
+  min_audio_sec: 1.0
+
+workers:
+  gpu_index: 0
+  queue_size: 8
+  inference_timeout_sec: 120
+  enqueue_timeout_sec: 2
+  shutdown_timeout_sec: 10
+  warmup_audio: ../test_audio/command/001_command.wav
+
+speaker:
+  match_threshold: 0.70
+
+input:
+  wav_gap_ms: 900
+  microphone_device: null
+  microphone_queue_frames: 128
+
+logging:
+  level: INFO
+  output_text: true
+

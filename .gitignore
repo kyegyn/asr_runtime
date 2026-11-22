@@ -1,0 +1,9 @@
+.venv/
+.uv-cache/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+log/*.log
+data/speakers/*.npy
+data/speakers/registry.json
+
